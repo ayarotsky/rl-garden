@@ -26,7 +26,7 @@ def create_policy_eval_video(policy, env_name, num_episodes=5, fps=30):
                 video.append_data(eval_py_env.render())
 
 num_iterations = 30000
-initial_collect_steps = 1000
+initial_collect_steps = 3000
 collect_steps_per_iteration = 1
 replay_buffer_max_length = 100000
 batch_size = 64
@@ -36,6 +36,8 @@ env_name = 'CartPole-v0'
 
 train_py_env = suite_gym.load(env_name)
 train_env = tf_py_environment.TFPyEnvironment(train_py_env)
+eval_py_env = suite_gym.load(env_name)
+eval_env = tf_py_environment.TFPyEnvironment(eval_py_env)
 
 q_net = q_network.QNetwork(train_env.observation_spec(),
                            train_env.action_spec(),
@@ -52,27 +54,33 @@ replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
     max_length=replay_buffer_max_length)
 random_policy = random_tf_policy.RandomTFPolicy(train_env.time_step_spec(),
                                                 train_env.action_spec())
+observers = [replay_buffer.add_batch]
+
 dynamic_step_driver.DynamicStepDriver(
     train_env,
     random_policy,
-    observers=[replay_buffer.add_batch],
+    observers=observers,
     num_steps=initial_collect_steps
 ).run()
 
 dataset = replay_buffer.as_dataset(num_parallel_calls=3,
                                    sample_batch_size=batch_size,
                                    num_steps=2).prefetch(3)
-iterator = iter(dataset)
+batched_experience = iter(dataset)
 
 agent.train = common.function(agent.train)
+time_step = None
+policy_state = agent.collect_policy.get_initial_state(train_env.batch_size)
+collect_driver = dynamic_step_driver.DynamicStepDriver(
+    train_env,
+    agent.collect_policy,
+    observers=observers,
+    num_steps=collect_steps_per_iteration)
 
 for _ in tqdm(range(num_iterations), desc='Training DQN'):
-    dynamic_step_driver.DynamicStepDriver(
-        train_env,
-        agent.collect_policy,
-        observers=[replay_buffer.add_batch],
-        num_steps=collect_steps_per_iteration).run()
-    experience, _ = next(iterator)
+    time_step, policy_state = collect_driver.run(time_step=time_step,
+                                                 policy_state=policy_state)
+    experience, _ = next(batched_experience)
     agent.train(experience)
 
 create_policy_eval_video(agent.policy, env_name, num_eval_episodes)
